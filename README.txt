@@ -10,7 +10,7 @@ address $000A0000
 // jump or branch to label
 jal :label
 nop
-beq v0, zero, :label:
+beq v0, zero, :label
 nop
 // print text
 print "bla bla bla"
