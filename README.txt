@@ -1,5 +1,6 @@
 [About]
 - Code Designer Lite is based on Code Designer 2.3 by Gtlcpimp.
+- Shoutout to 1UP for correcting the code.
 - It compiles mips assembly instructions into a raw code format for Playstation 2 cheat devices or PCSX2 pnach files.
 - Compile errors are listed in the output window using this format: Line# FileName ErrorMessage
 
