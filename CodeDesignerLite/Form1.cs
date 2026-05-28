@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
 using System.ComponentModel;
 using System.Data;
@@ -19,7 +19,7 @@ namespace CodeDesignerLite
     public partial class Form1 : Form
     {
         // version
-        private const string CDL_Version = "1.073";
+        private const string CDL_Version = "1.079";
 
         // These are standard Scintilla constants.
         private const int SCI_SETCODEPAGE = 2077;
@@ -44,8 +44,10 @@ namespace CodeDesignerLite
         private FlowLayoutPanel tabFlowPanel;
         private Button btnAddTab;
         private Button btnOpenTab;
+        private ContextMenuStrip inputContextMenu;
         private readonly List<EditorTab> editorTabs = new List<EditorTab>();
         private EditorTab activeTab;
+        private DarkFindForm findForm;
         private bool isSwitchingTabs = false;
 
         private const string UserConfigFileName = "CodeDesignerLite.config";
@@ -73,6 +75,7 @@ namespace CodeDesignerLite
 
         // Enum to represent the output mode
         private enum OutputFormatMode { PS2, Pnach }
+        private enum FindResult { EmptySearch, NoActiveTab, NoText, NotFound, Found, FoundAfterWrap }
         private OutputFormatMode currentOutputFormat = OutputFormatMode.PS2; // Default to PS2
 
 
@@ -281,6 +284,12 @@ namespace CodeDesignerLite
                 }
             }
 
+            if (findForm != null && !findForm.IsDisposed)
+            {
+                findForm.AllowClose = true;
+                findForm.Close();
+            }
+
             base.OnFormClosing(e);
         }
 
@@ -302,6 +311,90 @@ namespace CodeDesignerLite
             }
         }
 
+        protected override bool ProcessCmdKey(ref Message msg, Keys keyData)
+        {
+            if (keyData == (Keys.Control | Keys.F))
+            {
+                ShowFindWindow();
+                return true;
+            }
+
+            return base.ProcessCmdKey(ref msg, keyData);
+        }
+
+        private void ShowFindWindow()
+        {
+            if (findForm == null || findForm.IsDisposed)
+                findForm = new DarkFindForm(this);
+
+            if (!findForm.Visible)
+            {
+                findForm.CenterOverOwner();
+                findForm.Show(this);
+            }
+            else
+            {
+                findForm.BringToFront();
+            }
+
+            findForm.FocusSearchText();
+        }
+
+        private FindResult FindNextInActiveTab(string searchText)
+        {
+            if (string.IsNullOrEmpty(searchText))
+                return FindResult.EmptySearch;
+
+            if (activeTab == null || rtbInput == null || rtbInput.IsDisposed || !rtbInput.Enabled)
+                return FindResult.NoActiveTab;
+
+            string inputText = rtbInput.Text ?? string.Empty;
+            if (inputText.Length == 0)
+                return FindResult.NoText;
+
+            int textLength = inputText.Length;
+            int startPosition = 0;
+
+            try
+            {
+                int selectionStart = ClampToRange(rtbInput.SelectionStart, 0, textLength);
+                int selectionEnd = ClampToRange(rtbInput.SelectionEnd, 0, textLength);
+                startPosition = Math.Max(selectionStart, selectionEnd);
+            }
+            catch
+            {
+                startPosition = ClampToRange(rtbInput.CurrentPosition, 0, textLength);
+            }
+
+            if (startPosition >= textLength)
+                startPosition = 0;
+
+            int matchIndex = inputText.IndexOf(searchText, startPosition, StringComparison.OrdinalIgnoreCase);
+            bool wrapped = false;
+
+            if (matchIndex < 0 && startPosition > 0)
+            {
+                matchIndex = inputText.IndexOf(searchText, 0, startPosition, StringComparison.OrdinalIgnoreCase);
+                wrapped = matchIndex >= 0;
+            }
+
+            if (matchIndex < 0)
+                return FindResult.NotFound;
+
+            try
+            {
+                rtbInput.SetSelection(matchIndex, matchIndex + searchText.Length);
+                rtbInput.ScrollCaret();
+                SaveActiveTabViewState();
+            }
+            catch
+            {
+                return FindResult.NotFound;
+            }
+
+            return wrapped ? FindResult.FoundAfterWrap : FindResult.Found;
+        }
+
         private void ApplyDarkThemeToControl(Control control)
         {
             if (control == null)
@@ -318,6 +411,115 @@ namespace CodeDesignerLite
             {
                 // Native dark scrollbar theming is best-effort and OS-version dependent.
             }
+        }
+
+        private ContextMenuStrip CreateInputContextMenu()
+        {
+            ContextMenuStrip menu = new ContextMenuStrip
+            {
+                BackColor = colorMenuBackground,
+                ForeColor = colorTextPrimary,
+                ShowImageMargin = false,
+                Padding = Padding.Empty,
+                RenderMode = ToolStripRenderMode.Professional,
+                Renderer = new ToolStripProfessionalRenderer(new CustomColorTable(colorMenuBackground, colorMenuHover, colorControlBackground, colorAccent))
+            };
+
+            menu.Items.Add(CreateDarkContextMenuItem("Cut", InputContextMenu_Cut, "mnuInputCut"));
+            menu.Items.Add(CreateDarkContextMenuItem("Copy", InputContextMenu_Copy, "mnuInputCopy"));
+            menu.Items.Add(CreateDarkContextMenuItem("Paste", InputContextMenu_Paste, "mnuInputPaste"));
+            menu.Items.Add(CreateDarkContextMenuItem("Delete", InputContextMenu_Delete, "mnuInputDelete"));
+            menu.Items.Add(new ToolStripSeparator { BackColor = colorMenuBackground, ForeColor = colorTextSecondary });
+            menu.Items.Add(CreateDarkContextMenuItem("Select All", InputContextMenu_SelectAll, "mnuInputSelectAll"));
+            menu.Opening += InputContextMenu_Opening;
+
+            return menu;
+        }
+
+        private ToolStripMenuItem CreateDarkContextMenuItem(string text, EventHandler clickHandler, string name)
+        {
+            ToolStripMenuItem item = new ToolStripMenuItem(text)
+            {
+                Name = name,
+                BackColor = colorMenuBackground,
+                ForeColor = colorTextPrimary
+            };
+            item.Click += clickHandler;
+            return item;
+        }
+
+        private void InputContextMenu_Opening(object sender, CancelEventArgs e)
+        {
+            bool hasEditor = rtbInput != null && !rtbInput.IsDisposed && activeTab != null;
+            bool hasSelection = false;
+            bool canPaste = false;
+            bool hasText = false;
+
+            if (hasEditor)
+            {
+                try
+                {
+                    hasSelection = rtbInput.SelectionStart != rtbInput.SelectionEnd;
+                    canPaste = rtbInput.CanPaste;
+                    hasText = rtbInput.TextLength > 0;
+                }
+                catch
+                {
+                    hasSelection = false;
+                    canPaste = false;
+                    hasText = false;
+                }
+            }
+
+            SetInputContextMenuItemEnabled("mnuInputCut", hasEditor && hasSelection);
+            SetInputContextMenuItemEnabled("mnuInputCopy", hasEditor && hasSelection);
+            SetInputContextMenuItemEnabled("mnuInputPaste", hasEditor && canPaste);
+            SetInputContextMenuItemEnabled("mnuInputDelete", hasEditor && hasSelection);
+            SetInputContextMenuItemEnabled("mnuInputSelectAll", hasEditor && hasText);
+        }
+
+        private void SetInputContextMenuItemEnabled(string name, bool enabled)
+        {
+            if (inputContextMenu == null)
+                return;
+
+            ToolStripItem[] items = inputContextMenu.Items.Find(name, false);
+            if (items.Length == 0)
+                return;
+
+            items[0].Enabled = enabled;
+            items[0].ForeColor = enabled ? colorTextPrimary : colorTextSecondary;
+            items[0].BackColor = colorMenuBackground;
+        }
+
+        private void InputContextMenu_Cut(object sender, EventArgs e)
+        {
+            if (rtbInput != null && !rtbInput.IsDisposed && activeTab != null)
+                rtbInput.Cut();
+        }
+
+        private void InputContextMenu_Copy(object sender, EventArgs e)
+        {
+            if (rtbInput != null && !rtbInput.IsDisposed && activeTab != null)
+                rtbInput.Copy();
+        }
+
+        private void InputContextMenu_Paste(object sender, EventArgs e)
+        {
+            if (rtbInput != null && !rtbInput.IsDisposed && activeTab != null && rtbInput.CanPaste)
+                rtbInput.Paste();
+        }
+
+        private void InputContextMenu_Delete(object sender, EventArgs e)
+        {
+            if (rtbInput != null && !rtbInput.IsDisposed && activeTab != null)
+                rtbInput.ReplaceSelection(string.Empty);
+        }
+
+        private void InputContextMenu_SelectAll(object sender, EventArgs e)
+        {
+            if (rtbInput != null && !rtbInput.IsDisposed && activeTab != null)
+                rtbInput.SelectAll();
         }
 
         private void ConfigureDarkRadioButton(RadioButton radioButton)
@@ -471,7 +673,7 @@ namespace CodeDesignerLite
             }
             // --- END ICON SETTING ---
             
-            this.Text = "Code Designer Lite";
+            this.Text = GetWindowTitle();
             this.BackColor = colorFormBackground;
             this.ForeColor = colorTextPrimary;
             this.Size = new Size(850, 700); //1000, 700
@@ -479,45 +681,24 @@ namespace CodeDesignerLite
             this.Font = new Font("Segoe UI", 9F, FontStyle.Regular, GraphicsUnit.Point, ((byte)(0)));
 
             // --- Root Layout ---
-            // Keep the menu, tab strip, and editor panes in fixed rows so the tab strip never overlaps content.
+            // Keep the tab strip and editor panes in fixed rows so the tab strip never overlaps content.
             TableLayoutPanel rootLayout = new TableLayoutPanel
             {
                 Dock = DockStyle.Fill,
                 Padding = Padding.Empty,
                 Margin = Padding.Empty,
-                RowCount = 3,
+                RowCount = 2,
                 ColumnCount = 1,
                 BackColor = colorFormBackground
             };
             rootLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100F));
-            rootLayout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
             rootLayout.RowStyles.Add(new RowStyle(SizeType.Absolute, 28F));
             rootLayout.RowStyles.Add(new RowStyle(SizeType.Percent, 100F));
             this.Controls.Add(rootLayout);
 
-            // --- Menu Strip ---
-            menuStrip = new MenuStrip();
-            ToolStripMenuItem fileMenu = new ToolStripMenuItem("&File");
-            fileMenu.ForeColor = Color.Black;
-            ToolStripMenuItem newMenuItem = new ToolStripMenuItem("&New", null, BtnNew_Click) { ForeColor = Color.Black };
-            ToolStripMenuItem openMenuItem = new ToolStripMenuItem("&Open...", null, BtnOpen_Click) { ForeColor = Color.Black };
-            ToolStripMenuItem saveMenuItem = new ToolStripMenuItem("&Save", null, BtnSave_Click) { ForeColor = Color.Black };
-            ToolStripMenuItem saveAsMenuItem = new ToolStripMenuItem("Save &As...", null, BtnSaveAs_Click) { ForeColor = Color.Black };
-            ToolStripSeparator separator = new ToolStripSeparator();
-            ToolStripMenuItem exitMenuItem = new ToolStripMenuItem("E&xit", null, (s, e) => this.Close()) { ForeColor = Color.Black };
-            fileMenu.DropDownItems.AddRange(new ToolStripItem[] { newMenuItem, openMenuItem, saveMenuItem, saveAsMenuItem, separator, exitMenuItem });
-            ToolStripMenuItem aboutMenu = new ToolStripMenuItem("&About");
-            aboutMenu.ForeColor = Color.Black;
-            aboutMenu.Click += AboutMenuItem_Click;
-            menuStrip.Items.AddRange(new ToolStripItem[] { fileMenu, aboutMenu });
-            ConfigureMenuStrip(menuStrip);
-            menuStrip.Dock = DockStyle.Fill;
-            rootLayout.Controls.Add(menuStrip, 0, 0);
-            this.MainMenuStrip = menuStrip;
-
             tabBarPanel = CreateTabBarPanel();
             tabBarPanel.Dock = DockStyle.Fill;
-            rootLayout.Controls.Add(tabBarPanel, 0, 1);
+            rootLayout.Controls.Add(tabBarPanel, 0, 0);
 
             // --- Main Layout Panel ---
             TableLayoutPanel mainPanel = new TableLayoutPanel
@@ -531,7 +712,7 @@ namespace CodeDesignerLite
             };
             mainPanel.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 78F));
             mainPanel.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 22F));
-            rootLayout.Controls.Add(mainPanel, 0, 2);
+            rootLayout.Controls.Add(mainPanel, 0, 1);
 
 
             // --- Left Pane (Input Area) ---
@@ -682,6 +863,8 @@ namespace CodeDesignerLite
             rtbInput.TextChanged += RtbInput_TextChanged;
             rtbInput.UpdateUI += RtbInput_UpdateUI;
             rtbInput.HandleCreated += (s, e) => ApplyDarkThemeToControl(rtbInput);
+            inputContextMenu = CreateInputContextMenu();
+            rtbInput.ContextMenuStrip = inputContextMenu;
 
             TableLayoutPanel inputAreaLayout = new TableLayoutPanel { Dock = DockStyle.Fill, RowCount = 1, BackColor = colorPaneBackground };
             inputAreaLayout.RowStyles.Add(new RowStyle(SizeType.Percent, 100F));
@@ -716,7 +899,8 @@ namespace CodeDesignerLite
                 ForeColor = colorTextPrimary,
                 BorderStyle = BorderStyle.None,
                 WordWrap = false,
-                ScrollBars = RichTextBoxScrollBars.Both
+                ScrollBars = RichTextBoxScrollBars.Both,
+                Margin = new Padding(0, 3, 0, 0)
             };
             rtbOutput.HandleCreated += (s, e) => ApplyDarkThemeToControl(rtbOutput);
 
@@ -750,7 +934,7 @@ namespace CodeDesignerLite
                 Dock = DockStyle.Bottom,
                 AutoSize = true,
                 AutoSizeMode = AutoSizeMode.GrowAndShrink,
-                Padding = new Padding(0, 5, 0, 0),
+                Padding = new Padding(0, 3, 0, 0),
                 BackColor = colorPaneBackground,
                 ColumnCount = 2,
                 RowCount = 4,
@@ -2815,20 +2999,29 @@ namespace CodeDesignerLite
 
             tabFlowPanel.SuspendLayout();
             tabFlowPanel.Controls.Clear();
-            foreach (EditorTab tab in editorTabs)
-            {
-                if (tab.TabPanel == null)
-                    CreateTabControl(tab);
-                tabFlowPanel.Controls.Add(tab.TabPanel);
-            }
+
             if (btnOpenTab != null)
             {
-                btnOpenTab.Margin = editorTabs.Count > 0 ? new Padding(1, 0, 0, 0) : Padding.Empty;
+                btnOpenTab.Margin = Padding.Empty;
                 tabFlowPanel.Controls.Add(btnOpenTab);
             }
 
-            btnAddTab.Margin = new Padding(1, 0, 0, 0);
-            tabFlowPanel.Controls.Add(btnAddTab);
+            if (btnAddTab != null)
+            {
+                btnAddTab.Margin = new Padding(1, 0, 0, 0);
+                tabFlowPanel.Controls.Add(btnAddTab);
+            }
+
+            for (int i = 0; i < editorTabs.Count; i++)
+            {
+                EditorTab tab = editorTabs[i];
+                if (tab.TabPanel == null)
+                    CreateTabControl(tab);
+
+                tab.TabPanel.Margin = i == 0 ? new Padding(1, 0, 0, 0) : Padding.Empty;
+                tabFlowPanel.Controls.Add(tab.TabPanel);
+            }
+
             tabFlowPanel.ResumeLayout();
             ResizeTabsToFit();
         }
@@ -2842,9 +3035,10 @@ namespace CodeDesignerLite
             if (btnOpenTab != null)
                 tabButtonWidth += btnOpenTab.Width + btnOpenTab.Margin.Horizontal;
 
-            int availableWidth = tabFlowPanel.ClientSize.Width - tabButtonWidth;
+            int firstTabGap = editorTabs.Count > 0 ? 1 : 0;
+            int availableWidth = tabFlowPanel.ClientSize.Width - tabButtonWidth - firstTabGap;
             if (availableWidth < 1)
-                availableWidth = tabBarPanel != null ? tabBarPanel.ClientSize.Width - tabButtonWidth : 120;
+                availableWidth = tabBarPanel != null ? tabBarPanel.ClientSize.Width - tabButtonWidth - firstTabGap : 120;
 
             int tabWidth = 170;
             if (editorTabs.Count > 0)
@@ -3152,16 +3346,14 @@ namespace CodeDesignerLite
             return ellipsis;
         }
 
+        private string GetWindowTitle()
+        {
+            return "Code Designer Lite v" + CDL_Version;
+        }
+
         private void UpdateWindowTitle()
         {
-            if (activeTab == null)
-            {
-                this.Text = "Code Designer Lite";
-                return;
-            }
-
-            string dirtyMarker = activeTab.IsDirty ? "*" : string.Empty;
-            this.Text = "Code Designer Lite - " + dirtyMarker + activeTab.DisplayName;
+            this.Text = GetWindowTitle();
         }
 
 
@@ -3270,6 +3462,219 @@ namespace CodeDesignerLite
                             MessageBoxButtons.OK,
                             MessageBoxIcon.Information);
         }
+        private class DarkFindForm : Form
+        {
+            private readonly Form1 ownerForm;
+            private readonly Label lblFind;
+            private readonly TextBox txtFind;
+            private readonly Button btnFindNext;
+            private readonly Label lblStatus;
+
+            public bool AllowClose { get; set; }
+
+            public DarkFindForm(Form1 owner)
+            {
+                ownerForm = owner;
+                AllowClose = false;
+
+                Text = "Find";
+                StartPosition = FormStartPosition.Manual;
+                Size = new Size(450, 142);
+                MinimumSize = Size;
+                MaximumSize = Size;
+                FormBorderStyle = FormBorderStyle.FixedDialog;
+                MaximizeBox = false;
+                MinimizeBox = false;
+                ShowInTaskbar = false;
+                BackColor = ownerForm.colorFormBackground;
+                ForeColor = ownerForm.colorTextPrimary;
+                Font = new Font("Segoe UI", 9F, FontStyle.Regular, GraphicsUnit.Point, ((byte)(0)));
+                Padding = new Padding(8);
+                KeyPreview = true;
+
+                TableLayoutPanel layout = new TableLayoutPanel
+                {
+                    Dock = DockStyle.Fill,
+                    RowCount = 3,
+                    ColumnCount = 2,
+                    BackColor = ownerForm.colorFormBackground,
+                    Padding = Padding.Empty,
+                    Margin = Padding.Empty
+                };
+                layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 22F));
+                layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 31F));
+                layout.RowStyles.Add(new RowStyle(SizeType.Percent, 100F));
+                layout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100F));
+                layout.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
+
+                lblFind = new Label
+                {
+                    Text = "Find:",
+                    AutoSize = true,
+                    ForeColor = ownerForm.colorTextSecondary,
+                    Anchor = AnchorStyles.Left | AnchorStyles.Top,
+                    Margin = new Padding(0, 0, 0, 0)
+                };
+
+                txtFind = new TextBox
+                {
+                    Dock = DockStyle.Fill,
+                    BorderStyle = BorderStyle.FixedSingle,
+                    BackColor = ownerForm.colorEditorBackground,
+                    ForeColor = ownerForm.colorTextPrimary,
+                    Margin = new Padding(0, 0, 0, 6)
+                };
+                txtFind.HandleCreated += (s, e) => ownerForm.ApplyDarkThemeToControl(txtFind);
+
+                btnFindNext = new Button
+                {
+                    Text = "Find Next",
+                    Width = 82,
+                    Height = 26,
+                    Anchor = AnchorStyles.Right | AnchorStyles.Bottom,
+                    FlatStyle = FlatStyle.Flat,
+                    BackColor = ownerForm.colorControlBackground,
+                    ForeColor = ownerForm.colorTextPrimary,
+                    Cursor = Cursors.Hand,
+                    Margin = new Padding(8, 6, 0, 0)
+                };
+                btnFindNext.FlatAppearance.BorderSize = 0;
+                btnFindNext.FlatAppearance.MouseOverBackColor = ownerForm.colorControlHover;
+                btnFindNext.FlatAppearance.MouseDownBackColor = ownerForm.colorControlHover;
+                btnFindNext.Click += (s, e) => RequestFindNext();
+
+                lblStatus = new Label
+                {
+                    Text = "Press F5 for next match.",
+                    AutoSize = false,
+                    Dock = DockStyle.Fill,
+                    ForeColor = ownerForm.colorTextSecondary,
+                    TextAlign = ContentAlignment.MiddleLeft,
+                    Margin = new Padding(0, 6, 0, 0)
+                };
+
+                layout.Controls.Add(lblFind, 0, 0);
+                layout.SetColumnSpan(lblFind, 2);
+                layout.Controls.Add(txtFind, 0, 1);
+                layout.SetColumnSpan(txtFind, 2);
+                layout.Controls.Add(lblStatus, 0, 2);
+                layout.Controls.Add(btnFindNext, 1, 2);
+
+                Controls.Add(layout);
+                AcceptButton = btnFindNext;
+            }
+
+            protected override void OnHandleCreated(EventArgs e)
+            {
+                base.OnHandleCreated(e);
+                try
+                {
+                    if (Environment.OSVersion.Platform != PlatformID.Win32NT || Handle == IntPtr.Zero)
+                        return;
+
+                    int useDarkMode = 1;
+                    DwmSetWindowAttribute(Handle, 20, ref useDarkMode, sizeof(int));
+                    DwmSetWindowAttribute(Handle, 19, ref useDarkMode, sizeof(int));
+                }
+                catch
+                {
+                    // Dark title bar is best-effort on older Windows builds.
+                }
+            }
+            public void CenterOverOwner()
+            {
+                Form owner = Owner ?? ownerForm;
+                if (owner == null || owner.IsDisposed)
+                    return;
+
+                Rectangle bounds = owner.Bounds;
+                int x = bounds.Left + (bounds.Width - Width) / 2;
+                int y = bounds.Top + (bounds.Height - Height) / 2;
+
+                Rectangle workingArea = Screen.FromControl(owner).WorkingArea;
+                x = Math.Max(workingArea.Left, Math.Min(x, workingArea.Right - Width));
+                y = Math.Max(workingArea.Top, Math.Min(y, workingArea.Bottom - Height));
+
+                Location = new Point(x, y);
+            }
+
+
+            protected override void OnFormClosing(FormClosingEventArgs e)
+            {
+                if (!AllowClose && e.CloseReason == CloseReason.UserClosing)
+                {
+                    e.Cancel = true;
+                    Hide();
+                    return;
+                }
+
+                base.OnFormClosing(e);
+            }
+
+            protected override bool ProcessCmdKey(ref Message msg, Keys keyData)
+            {
+                if (keyData == Keys.F5)
+                {
+                    RequestFindNext();
+                    return true;
+                }
+
+                if (keyData == (Keys.Control | Keys.F))
+                {
+                    FocusSearchText();
+                    return true;
+                }
+
+                return base.ProcessCmdKey(ref msg, keyData);
+            }
+
+            public void FocusSearchText()
+            {
+                if (txtFind == null || txtFind.IsDisposed)
+                    return;
+
+                txtFind.Focus();
+                txtFind.SelectAll();
+            }
+
+            private void RequestFindNext()
+            {
+                FindResult result = ownerForm.FindNextInActiveTab(txtFind.Text);
+                UpdateStatus(result);
+            }
+
+            private void UpdateStatus(FindResult result)
+            {
+                switch (result)
+                {
+                    case FindResult.EmptySearch:
+                        lblStatus.Text = "Enter text to find.";
+                        lblStatus.ForeColor = ownerForm.colorTextSecondary;
+                        break;
+                    case FindResult.NoActiveTab:
+                        lblStatus.Text = "No input tab is open.";
+                        lblStatus.ForeColor = ownerForm.colorTextSecondary;
+                        break;
+                    case FindResult.NoText:
+                        lblStatus.Text = "The active input tab is empty.";
+                        lblStatus.ForeColor = ownerForm.colorTextSecondary;
+                        break;
+                    case FindResult.NotFound:
+                        lblStatus.Text = "No match found.";
+                        lblStatus.ForeColor = ownerForm.colorErrorBackground;
+                        break;
+                    case FindResult.FoundAfterWrap:
+                        lblStatus.Text = "Found match from start.";
+                        lblStatus.ForeColor = ownerForm.colorTextSecondary;
+                        break;
+                    default:
+                        lblStatus.Text = "Found match.";
+                        lblStatus.ForeColor = ownerForm.colorTextSecondary;
+                        break;
+                }
+            }
+        }
+
         private class DarkRadioButton : RadioButton
         {
             private bool isMouseOver;
